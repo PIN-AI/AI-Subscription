@@ -1,0 +1,43 @@
+{
+  "name": "smart-contracts-example",
+  "version": "1.0.0",
+  "description": "Smart contracts for Example",
+  "main": "index.js",
+  "scripts": {
+    "clean": "rm -rf ./artifacts ./cache ./coverage ./types ./coverage.json",
+    "test": "hardhat test",
+    "compile": "pnpm clean && hardhat compile",
+    "deploy:ExampleToken": "hardhat run scripts/ExampleTokenDeploy.ts"
+  },
+  "devDependencies": {
+    "@babel/plugin-syntax-jsx": "^7.27.1",
+    "@nomicfoundation/hardhat-chai-matchers": "^2.0.3",
+    "@nomicfoundation/hardhat-ethers": "^3.0.5",
+    "@nomicfoundation/hardhat-toolbox": "^4.0.0",
+    "@nomicfoundation/hardhat-verify": "^2.0.3",
+    "@openzeppelin/hardhat-upgrades": "^3.8.0",
+    "@typechain/hardhat": "^9.1.0",
+    "@types/chai": "^4.3.20",
+    "cross-env": "^7.0.3",
+    "eslint": "^9.9.0",
+    "eslint-config-prettier": "^8.5.0",
+    "ethers": "^6.10.0",
+    "hardhat": "^2.19.4",
+    "hardhat-gas-reporter": "^1.0.9",
+    "prettier": "^2.8.4",
+    "prettier-plugin-solidity": "^1.1.2",
+    "solhint": "^3.4.0",
+    "solhint-plugin-prettier": "^0.0.5",
+    "solidity-coverage": "0.8.12",
+    "typechain": "^8.3.2"
+  },
+  "dependencies": {
+    "@nomicfoundation/hardhat-network-helpers": "^1.0.12",
+    "@openzeppelin/contracts": "^5.0.1",
+    "@openzeppelin/contracts-upgradeable": "^5.0.1",
+    "@thundernetworkrad/readline-sync": "^2023.3.13-1",
+    "@trivago/prettier-plugin-sort-imports": "^5.2.1",
+    "dotenv": "^16.0.3",
+    "solady": "^0.0.288"
+  }
+}

@@ -1,0 +1,14 @@
+{
+  "compilerOptions": {
+    "target": "es2020",
+    "module": "commonjs",
+    "moduleResolution": "node",
+    "strict": true,
+    "esModuleInterop": true,
+    "outDir": "dist",
+    "declaration": true,
+    "resolveJsonModule": true
+  },
+  "include": ["./scripts", "./test", "./typechain-types", "scripts-legacy/advance-time.ts", "scripts-legacy/AICreaditDeploy.ts", "scripts-legacy/create-ido.ts", "scripts-legacy/deploy_ido.ts", "scripts-legacy/deploy-ido-aicreadit.ts", "scripts-legacy/ExampleTokenDeploy.ts", "scripts-legacy/test-ido-aicreadit.ts"],
+  "files": ["./hardhat.config.ts"]
+} 
