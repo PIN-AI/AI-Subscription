@@ -260,7 +260,7 @@ contract AISubscription is Initializable, AccessControlUpgradeable, PausableUpgr
      * @dev Function that should revert when `msg.sender` is not authorized to upgrade the contract. Called by
      * {upgradeTo} and {upgradeToAndCall}.
      */
-    function _authorizeUpgrade(address newImplementation) internal override onlyRole(ADMIN_ROLE) {}
+    function _authorizeUpgrade(address newImplementation) internal override onlyRole(DEFAULT_ADMIN_ROLE) {}
 
     /**
      * @dev Internal function to mint a new token
@@ -443,4 +443,9 @@ contract AISubscription is Initializable, AccessControlUpgradeable, PausableUpgr
         
         emit TokenBurned(tokenId_, cardId);
     }
+
+    /**
+    * @dev Gap
+    */
+    uint256[50] private __gap;
 }

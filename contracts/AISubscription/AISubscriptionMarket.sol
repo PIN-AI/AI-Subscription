@@ -80,6 +80,11 @@ contract AISubscriptionMarket is Initializable, AccessControlUpgradeable, UUPSUp
     );
 
     /**
+     * @dev Event emitted when active subscription payment is paid
+     */
+    event PayActiveSubscription(address indexed user, uint256 amount);
+
+    /**
      * @dev Role definitions
      */
     bytes32 public constant ADMIN_ROLE = keccak256("ADMIN_ROLE");
@@ -118,6 +123,15 @@ contract AISubscriptionMarket is Initializable, AccessControlUpgradeable, UUPSUp
     
     /// @dev Refund window settings
     TimeWindow public refundWindow;
+
+    // @dev Payment for active subscription
+    uint256 public activeSubscriptionPayment;
+
+    /// @dev mapping of active subscriptions
+    mapping(address => bool) public activeSubscription;
+
+    /// @dev mapping of user's card ID
+    mapping(address => uint256) public userCardId;
     
     /// @dev Mapping of token purchase timestamps
     mapping(uint256 => uint256) private tokenPurchaseTime;
@@ -147,17 +161,17 @@ contract AISubscriptionMarket is Initializable, AccessControlUpgradeable, UUPSUp
         
         // Initialize refund policy with default values
         refundPolicy = RefundPolicy({
-            windowDuration: 365 days,
-            baseRefundRate: 80,
-            decreaseRate: 33, // 0.33% per day, perfectly tuned for 26 weeks (182 days) period
-            minRefundRate: 20,
-            cooldownPeriod: 1 days
+            windowDuration: 0,
+            baseRefundRate: 100,
+            decreaseRate: 0,
+            minRefundRate: 100,
+            cooldownPeriod: 0
         });
         
         // Initialize purchase window
         purchaseWindow = TimeWindow({
-            startTime: 0,
-            endTime: 0
+            startTime: block.timestamp,
+            endTime: block.timestamp + 19 weeks
         });
         
         // Initialize refund window
@@ -189,14 +203,22 @@ contract AISubscriptionMarket is Initializable, AccessControlUpgradeable, UUPSUp
         // only one subscription per user
         require(subscription.balanceOf(msg.sender) == 0, "AM: already owned");
 
-        bytes32 messageHash = keccak256(
-            abi.encodePacked(msg.sender,block.chainid,address(this))
-        );
+        if (userCardId[msg.sender] != 0) {
+            require(userCardId[msg.sender] == cardId_, "AM: must same card");
+        }else{
+            userCardId[msg.sender] = cardId_;
+        }
 
-        require(hasRole(SIGNER_ROLE, (messageHash.toEthSignedMessageHash()).recover(signature_)), "AM: invalid signer");
+        // disabled signer check for now
+        // bytes32 messageHash = keccak256(
+        //     abi.encodePacked(msg.sender,block.chainid,address(this))
+        // );
 
-        uint price = getCardPrice(cardId_);
-        require(msg.value >= price, "AM: insufficient ETH");
+        // require(hasRole(SIGNER_ROLE, (messageHash.toEthSignedMessageHash()).recover(signature_)), "AM: invalid signer");
+
+        uint256 price = getCardPrice(cardId_);
+        uint256 payAmount = price + activeSubscriptionPayment;
+        require(msg.value >= payAmount, "AM: insufficient ETH");
         
         // Mint the subscription to the buyer
         uint tokenId = subscription.mint(msg.sender, cardId_, 1);
@@ -206,11 +228,12 @@ contract AISubscriptionMarket is Initializable, AccessControlUpgradeable, UUPSUp
         
         // if receiver is set, send ETH to receiver
         if (receiver != address(0)) {
-            (bool success, ) = receiver.call{value: price}("");
+            (bool success, ) = receiver.call{value: payAmount}("");
             require(success, "AM: transfer failed");
         }
+        _activateSubscription(msg.sender);
         
-        uint256 refund = msg.value - price;
+        uint256 refund = msg.value - payAmount;
         if (refund > 0) {
             (bool refundSuccess, ) = msg.sender.call{value: refund}("");
             require(refundSuccess, "AM: refund failed");
@@ -251,6 +274,53 @@ contract AISubscriptionMarket is Initializable, AccessControlUpgradeable, UUPSUp
         
         emit UpgradeSubscription(msg.sender, tokenId_, toCardId_);
         return true;
+    }
+
+    /**
+     * @dev Pay for active subscription
+     */
+    function payActiveSubscription() public payable {
+        uint256 _activeSubscriptionPayment = activeSubscriptionPayment;
+        require(!activeSubscription[msg.sender], "AM: Not active subscription");
+        require(msg.value >= _activeSubscriptionPayment, "AM: insufficient ETH");
+        
+        // if receiver is set, send ETH to receiver
+        if (receiver != address(0)) {
+            (bool success, ) = receiver.call{value: msg.value}("");
+            require(success, "AM: transfer failed");
+        }
+        _activateSubscription(msg.sender);
+        emit PayActiveSubscription(msg.sender, _activeSubscriptionPayment);
+    }
+
+    /**
+     * @dev Set active subscription payment
+     * @param amount New active subscription payment
+     */
+    function setActiveSubscriptionPayment(uint256 amount) public onlyRole(ADMIN_ROLE) {
+        activeSubscriptionPayment = amount;
+    }
+
+    /**
+     * @dev Internal function to pay for active subscription
+     */
+    function _payNativeToken(uint256 amount) internal {
+        (bool success, ) = msg.sender.call{value: amount}("");
+        require(success, "AM: transfer failed");
+    }
+
+    /**
+     * @dev Internal function to activate subscription
+     */
+    function _activateSubscription(address user) internal {
+        activeSubscription[user] = true;
+    }
+
+    /**
+     * @dev Internal function to deactivate subscription
+     */
+    function _deactivateSubscription(address user) internal {
+        activeSubscription[user] = false;
     }
     
     /**
@@ -342,7 +412,7 @@ contract AISubscriptionMarket is Initializable, AccessControlUpgradeable, UUPSUp
         
         // Check contract balance before refund
         require(address(this).balance >= refundAmount, "AM: insufficient contract balance");
-        
+
         // Update last refund time for cooldown
         lastRefundTime[msg.sender] = block.timestamp;
         
@@ -472,7 +542,6 @@ contract AISubscriptionMarket is Initializable, AccessControlUpgradeable, UUPSUp
             reason = "Global refund window already closed";
             return (eligible, refundAmount, timeLeft, reason);
         }
-        
         // Check token existence and ownership
         address owner;
         try subscription.ownerOf(tokenId_) returns (address tokenOwner) {
@@ -495,10 +564,16 @@ contract AISubscriptionMarket is Initializable, AccessControlUpgradeable, UUPSUp
         }
         
         // Check maximum holding time window
-        uint256 windowEnd = purchaseTime + refundPolicy.windowDuration;
-        if (block.timestamp > windowEnd) {
-            reason = "Max holding time exceeded";
-            return (eligible, refundAmount, timeLeft, reason);
+        if (refundPolicy.windowDuration > 0) {
+            uint256 windowEnd = purchaseTime + refundPolicy.windowDuration;
+            if (block.timestamp > windowEnd) {
+                reason = "Max holding time exceeded";
+                return (eligible, refundAmount, timeLeft, reason);
+            }
+            // Calculate remaining time in refund window
+            timeLeft = windowEnd - block.timestamp;
+        } else {
+            timeLeft = type(uint256).max; // no time limit
         }
         
         // cool down period
@@ -506,9 +581,6 @@ contract AISubscriptionMarket is Initializable, AccessControlUpgradeable, UUPSUp
             reason = "In cooldown period";
             return (eligible, refundAmount, timeLeft, reason);
         }
-        
-        // Calculate remaining time in refund window
-        timeLeft = windowEnd - block.timestamp;
         
         // Get card ID and price
         uint256 cardId = subscription.getCardIdByTokenId(tokenId_);
@@ -518,6 +590,12 @@ contract AISubscriptionMarket is Initializable, AccessControlUpgradeable, UUPSUp
         uint256 holdingDays = (block.timestamp - purchaseTime) / 1 days;
         uint256 refundRate = calculateRefundRate(holdingDays);
         refundAmount = (originalPrice * refundRate) / 100;
+        
+        // Check if user has already refunded once
+        if (lastRefundTime[owner_] != 0) {
+            reason = "Already used one-time refund chance";
+            return (eligible, refundAmount, timeLeft, reason);
+        }
         
         eligible = true;
         return (eligible, refundAmount, timeLeft, reason);
@@ -599,15 +677,20 @@ contract AISubscriptionMarket is Initializable, AccessControlUpgradeable, UUPSUp
         
         return (purchaseActive, purchaseTimeLeft, refundActive, refundTimeLeft);
     }
-    
+
     /**
      * @dev Function that should revert when `msg.sender` is not authorized to upgrade the contract. Called by
      * {upgradeTo} and {upgradeToAndCall}.
      */
-    function _authorizeUpgrade(address newImplementation) internal override onlyRole(ADMIN_ROLE) {}
+    function _authorizeUpgrade(address newImplementation) internal override onlyRole(DEFAULT_ADMIN_ROLE) {}
 
     /**
      * @dev Fallback function to receive ETH
      */
     receive() external payable {}
+
+    /**
+    * @dev Gap
+    */
+    uint256[50] private __gap;
 }
