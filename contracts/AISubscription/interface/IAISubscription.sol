@@ -45,20 +45,6 @@ interface IAISubscription {
         uint256 price_,
         string calldata tokenURI_
     ) external;
-    
-    /**
-     * @dev Updates an existing card type
-     * @param cardId_ Identifier of the card to update
-     * @param level_ New level for the card
-     * @param price_ New price for the card in ETH (wei)
-     * @param tokenURI_ New URI for the card metadata
-     */
-    function updateCard(
-        uint256 cardId_,
-        uint256 level_,
-        uint256 price_,
-        string calldata tokenURI_
-    ) external;
 
     /**
      * @dev Upgrades a subscription to a higher level card

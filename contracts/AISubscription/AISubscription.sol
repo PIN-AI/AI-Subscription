@@ -19,11 +19,26 @@ contract AISubscription is Initializable, AccessControlUpgradeable, PausableUpgr
      */
     bytes32 public constant ADMIN_ROLE = keccak256("ADMIN_ROLE");
     bytes32 public constant MARKET_ROLE = keccak256("MARKET_ROLE");
+    
+    /**
+     * @dev Maximum card price
+     */
+    uint256 internal constant _MAX_CARD_PRICE = 3 ether;
+
+    /**
+     * @dev Maximum card ID
+     */
+    uint256 internal constant _MAX_CARD_ID = 100;
 
     /**
      * @dev Counter for token IDs
      */
     uint256 private _currentTokenId;
+
+    /**
+     * @dev Array of card IDs
+     */
+    uint256[] public cardIds;
 
     /**
      * @dev Structure to store card information
@@ -135,6 +150,16 @@ contract AISubscription is Initializable, AccessControlUpgradeable, PausableUpgr
         if (market_ != address(0)) {
             _grantRole(MARKET_ROLE, market_);
         }
+
+        // new free card
+        cardInfoes[0] = CardInfo({
+            cardId: 0,
+            currentAmount: 0,
+            level: 0,
+            price: 0,
+            tokenURI: ""
+        });
+        cardIds.push(0);
         
     }
 
@@ -166,9 +191,11 @@ contract AISubscription is Initializable, AccessControlUpgradeable, PausableUpgr
         string calldata tokenURI_
     ) public onlyRole(ADMIN_ROLE) {
         require(
-            cardId_ != 0 && cardInfoes[cardId_].cardId == 0,
+            cardId_ != 0 && cardInfoes[cardId_].cardId == 0 && cardId_ <= _MAX_CARD_ID,
             "SUB: wrong cardId"
         );
+        
+        require(price_ <= _MAX_CARD_PRICE, "AIS: Price exceeds maximum limit");
 
         cardInfoes[cardId_] = CardInfo({
             cardId: cardId_,
@@ -177,38 +204,8 @@ contract AISubscription is Initializable, AccessControlUpgradeable, PausableUpgr
             price: price_,
             tokenURI: tokenURI_
         });
+        cardIds.push(cardId_);
         emit NewCard(cardId_);
-    }
-    
-    /**
-     * @dev Updates an existing card type
-     * @param cardId_ Identifier of the card to update
-     * @param level_ New level for the card
-     * @param price_ New price for the card in ETH (wei)
-     * @param tokenURI_ New URI for the card metadata
-     */
-    function updateCard(
-        uint256 cardId_,
-        uint256 level_,
-        uint256 price_,
-        string calldata tokenURI_
-    ) public onlyRole(ADMIN_ROLE) {
-        require(
-            cardId_ != 0 && cardInfoes[cardId_].cardId != 0,
-            "SUB: card not exist"
-        );
-        
-        uint256 currentAmount = cardInfoes[cardId_].currentAmount;
-        
-        cardInfoes[cardId_] = CardInfo({
-            cardId: cardId_,
-            currentAmount: currentAmount,
-            level: level_,
-            price: price_,
-            tokenURI: tokenURI_
-        });
-        
-        emit CardUpdated(cardId_, level_, price_, tokenURI_);
     }
 
     /**
@@ -224,7 +221,7 @@ contract AISubscription is Initializable, AccessControlUpgradeable, PausableUpgr
         uint256 amount_
     ) public whenNotPaused override onlyRole(MARKET_ROLE) returns (uint256 tokenId) {
         require(to_ != address(0), "SUB: mint to the zero address");
-        require(cardInfoes[cardId_].cardId != 0, "SUB: wrong cardId");
+        require(cardInfoes[cardId_].cardId == cardId_, "SUB: wrong cardId");
 
         for (uint256 i = 0; i < amount_; i++) {
             tokenId = getNextTokenId();
@@ -313,7 +310,6 @@ contract AISubscription is Initializable, AccessControlUpgradeable, PausableUpgr
      */
     function ownerOf(uint256 tokenId) public view returns (address) {
         address owner = _owners[tokenId];
-        require(owner != address(0), "SUB: nonexistent token");
         return owner;
     }
 
@@ -323,7 +319,6 @@ contract AISubscription is Initializable, AccessControlUpgradeable, PausableUpgr
      * @return uint256 token balance
      */
     function balanceOf(address owner) public view returns (uint256) {
-        require(owner != address(0), "SUB: balance query for the zero address");
         return _balances[owner];
     }
 
@@ -377,11 +372,54 @@ contract AISubscription is Initializable, AccessControlUpgradeable, PausableUpgr
     }
 
     /**
+     * @dev Returns the total number of subscribers
+     * @return Total number of subscribers
+     */
+    function getTotalSubscribers() public view returns (uint256) {
+        uint256 totalSubscribers = 0;
+        for (uint256 i = 0; i < cardIds.length; i++) {
+            totalSubscribers += getSubscribers(cardIds[i]);
+        }
+        return totalSubscribers;
+    }
+
+    /**
+     * @dev Returns the total amount committed
+     * @return Total amount committed
+     */
+    function getTotalCommitted() public view returns (uint256) {
+        uint256 totalCommitted = 0;
+        for (uint256 i = 0; i < cardIds.length; i++) {
+            totalCommitted += getCommitted(cardIds[i]);
+        }
+        return totalCommitted;
+    }
+
+    /**
+     * @dev Returns the number of subscribers for a given card ID
+     * @param cardId Card ID to query
+     * @return Number of subscribers
+     */
+    function getSubscribers(uint256 cardId) public view returns (uint256) {
+        return cardInfoes[cardId].currentAmount;
+    }
+
+    /**
+     * @dev Returns the total amount committed for a given card ID
+     * @param cardId Card ID to query
+     * @return Total amount committed
+     */
+    function getCommitted(uint256 cardId) public view returns (uint256) {
+        return cardInfoes[cardId].currentAmount * cardInfoes[cardId].price;
+    }
+
+    /**
      * @dev Authorizes or revokes admin role for a specific address
      * @param admin Address to authorize or revoke
      * @param isAuthorized Boolean indicating whether to authorize or revoke
      */
-    function authorizeAdmin(address admin, bool isAuthorized) public onlyRole(ADMIN_ROLE) {
+    function authorizeAdmin(address admin, bool isAuthorized) public onlyRole(DEFAULT_ADMIN_ROLE) {
+        require(admin != address(0), "AM: zero address");
         if (isAuthorized) {
             _grantRole(ADMIN_ROLE, admin);
         } else {
@@ -396,12 +434,23 @@ contract AISubscription is Initializable, AccessControlUpgradeable, PausableUpgr
      * @param isAuthorized Boolean indicating whether to authorize or revoke
      */
     function authorizeMarket(address market, bool isAuthorized) public onlyRole(ADMIN_ROLE) {
+        require(market != address(0), "AM: zero address");
         if (isAuthorized) {
             _grantRole(MARKET_ROLE, market);
         } else {
             _revokeRole(MARKET_ROLE, market);
         }
         emit AuthorizeMarket(market, isAuthorized);
+    }
+
+    /**
+     * @dev Transfers ownership to a new address
+     * @param newOwner Address to transfer ownership to
+     */
+    function transferOwnership(address newOwner) public onlyRole(DEFAULT_ADMIN_ROLE) {
+        require(newOwner != address(0), "AM: zero address");
+        _grantRole(DEFAULT_ADMIN_ROLE, newOwner);
+        _revokeRole(DEFAULT_ADMIN_ROLE, msg.sender);
     }
     
     /**

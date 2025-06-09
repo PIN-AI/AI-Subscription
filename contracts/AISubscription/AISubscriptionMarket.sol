@@ -3,6 +3,7 @@ pragma solidity ^0.8.27;
 import {AccessControlUpgradeable} from "@openzeppelin/contracts-upgradeable/access/AccessControlUpgradeable.sol";
 import {Initializable} from "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
 import {UUPSUpgradeable} from "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
+import {PausableUpgradeable} from "@openzeppelin/contracts-upgradeable/utils/PausableUpgradeable.sol";
 import {MessageHashUtils} from "@openzeppelin/contracts/utils/cryptography/MessageHashUtils.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
@@ -14,7 +15,7 @@ import {IAISubscription} from "./interface/IAISubscription.sol";
  * @title AISubscriptionMarket
  * @dev Contract for selling AISubscription records using native token as payment
  */
-contract AISubscriptionMarket is Initializable, AccessControlUpgradeable, UUPSUpgradeable, ReentrancyGuardUpgradeable {
+contract AISubscriptionMarket is Initializable, AccessControlUpgradeable, UUPSUpgradeable, ReentrancyGuardUpgradeable, PausableUpgradeable {
     using SafeERC20 for IERC20;
     using MessageHashUtils for bytes32;
     using ECDSA for bytes32;
@@ -82,13 +83,28 @@ contract AISubscriptionMarket is Initializable, AccessControlUpgradeable, UUPSUp
     /**
      * @dev Event emitted when active subscription payment is paid
      */
-    event PayActiveSubscription(address indexed user, uint256 amount);
+    event PayActiveSubscription(address indexed user, uint256 amount, uint256 tokenId);
+
+    /**
+     * @dev Event emitted when active subscription payment is set
+     */
+    event SetActiveSubscriptionPayment(uint256 amount);
+
+    /**
+     * @dev Event emitted when fund receiver is set
+     */
+    event SetFundReceiver(address indexed fundReceiver);
 
     /**
      * @dev Role definitions
      */
     bytes32 public constant ADMIN_ROLE = keccak256("ADMIN_ROLE");
     bytes32 public constant SIGNER_ROLE = keccak256("SIGNER_ROLE");
+
+    /**
+     * @dev Maximum refund rate
+     */
+    uint256 internal constant _MAX_REFUND_RATE = 100;
     
     /**
      * @dev Time window structure for limiting operations to specific periods
@@ -109,8 +125,14 @@ contract AISubscriptionMarket is Initializable, AccessControlUpgradeable, UUPSUp
         uint256 cooldownPeriod;   // Cooldown period after refund (seconds)
     }
 
+    /// @dev Maximum active subscription payment
+    uint256 internal constant _MAX_ACTIVE_SUBSCRIPTION_PAYMENT = 0.005 ether;
+
     /// @dev Receiver address
     address public receiver;
+
+    /// @dev Fund receiver address
+    address internal _fundReceiver;
     
     /// @dev AISubscription contract instance
     IAISubscription public subscription;
@@ -142,8 +164,9 @@ contract AISubscriptionMarket is Initializable, AccessControlUpgradeable, UUPSUp
     /**
      * @dev Initializes the contract
      */
-    function initialize(address subscriptionAddr_, address owner_, address admin_, address signer_) public initializer {
+    function initialize(address subscriptionAddr_, address owner_, address admin_, address signer_, address fundReceiver_) public initializer {
         __AccessControl_init();
+        __Pausable_init();
         __UUPSUpgradeable_init();
         __ReentrancyGuard_init();
         
@@ -151,6 +174,7 @@ contract AISubscriptionMarket is Initializable, AccessControlUpgradeable, UUPSUp
         require(owner_ != address(0), "AM: owner is the zero address");
         require(admin_ != address(0), "AM: admin is the zero address");
         require(signer_ != address(0), "AM: signer is the zero address");
+        require(fundReceiver_ != address(0), "AM: fund receiver is the zero address");
         
         _grantRole(DEFAULT_ADMIN_ROLE, owner_);
         _grantRole(ADMIN_ROLE, owner_);
@@ -158,6 +182,8 @@ contract AISubscriptionMarket is Initializable, AccessControlUpgradeable, UUPSUp
         _grantRole(SIGNER_ROLE, signer_);
         
         _setSubscriptionService(subscriptionAddr_);
+
+        _fundReceiver = fundReceiver_;
         
         // Initialize refund policy with default values
         refundPolicy = RefundPolicy({
@@ -170,8 +196,8 @@ contract AISubscriptionMarket is Initializable, AccessControlUpgradeable, UUPSUp
         
         // Initialize purchase window
         purchaseWindow = TimeWindow({
-            startTime: block.timestamp,
-            endTime: block.timestamp + 19 weeks
+            startTime: 0,
+            endTime: 0
         });
         
         // Initialize refund window
@@ -199,25 +225,24 @@ contract AISubscriptionMarket is Initializable, AccessControlUpgradeable, UUPSUp
      * @param cardId_ Card ID to purchase
      * @param signature_ Signature from the signer role
      */
-    function purchaseSubscription(uint256 cardId_, bytes calldata signature_) public nonReentrant withinPurchaseWindow payable {
+    function purchaseSubscription(uint256 cardId_, bytes calldata signature_) public nonReentrant withinPurchaseWindow whenNotPaused payable {
         // only one subscription per user
         require(subscription.balanceOf(msg.sender) == 0, "AM: already owned");
-
+        require(!activeSubscription[msg.sender], "AM: already active subscription");
+        
         if (userCardId[msg.sender] != 0) {
             require(userCardId[msg.sender] == cardId_, "AM: must same card");
         }else{
             userCardId[msg.sender] = cardId_;
         }
 
-        // disabled signer check for now
-        // bytes32 messageHash = keccak256(
-        //     abi.encodePacked(msg.sender,block.chainid,address(this))
-        // );
+        bytes32 messageHash = keccak256(
+            abi.encodePacked(msg.sender,block.chainid,address(this))
+        );
 
-        // require(hasRole(SIGNER_ROLE, (messageHash.toEthSignedMessageHash()).recover(signature_)), "AM: invalid signer");
+        require(hasRole(SIGNER_ROLE, (messageHash.toEthSignedMessageHash()).recover(signature_)), "AM: invalid signer");
 
-        uint256 price = getCardPrice(cardId_);
-        uint256 payAmount = price + activeSubscriptionPayment;
+        uint256 payAmount = getCardPrice(cardId_);
         require(msg.value >= payAmount, "AM: insufficient ETH");
         
         // Mint the subscription to the buyer
@@ -225,13 +250,14 @@ contract AISubscriptionMarket is Initializable, AccessControlUpgradeable, UUPSUp
         
         // Record purchase time for potential refund
         tokenPurchaseTime[tokenId] = block.timestamp;
+
+        _activateSubscription(msg.sender);
         
         // if receiver is set, send ETH to receiver
         if (receiver != address(0)) {
             (bool success, ) = receiver.call{value: payAmount}("");
             require(success, "AM: transfer failed");
         }
-        _activateSubscription(msg.sender);
         
         uint256 refund = msg.value - payAmount;
         if (refund > 0) {
@@ -248,7 +274,7 @@ contract AISubscriptionMarket is Initializable, AccessControlUpgradeable, UUPSUp
      * @param toCardId_ ID of the card to upgrade to
      * @return bool indicating successful operation
      */
-    function upgradeSubscription(uint256 tokenId_, uint256 toCardId_) public payable nonReentrant returns (bool) {
+    function upgradeSubscription(uint256 tokenId_, uint256 toCardId_) public payable nonReentrant whenNotPaused returns (bool) {
         // Check token ownership
         require(subscription.ownerOf(tokenId_) == msg.sender, "AM: Not owner");
         
@@ -279,9 +305,10 @@ contract AISubscriptionMarket is Initializable, AccessControlUpgradeable, UUPSUp
     /**
      * @dev Pay for active subscription
      */
-    function payActiveSubscription() public payable {
+    function payActiveSubscription() public payable whenNotPaused {
         uint256 _activeSubscriptionPayment = activeSubscriptionPayment;
-        require(!activeSubscription[msg.sender], "AM: Not active subscription");
+        require(subscription.balanceOf(msg.sender) == 0, "AM: already owned");
+        require(!activeSubscription[msg.sender], "AM: already active subscription");
         require(msg.value >= _activeSubscriptionPayment, "AM: insufficient ETH");
         
         // if receiver is set, send ETH to receiver
@@ -290,7 +317,10 @@ contract AISubscriptionMarket is Initializable, AccessControlUpgradeable, UUPSUp
             require(success, "AM: transfer failed");
         }
         _activateSubscription(msg.sender);
-        emit PayActiveSubscription(msg.sender, _activeSubscriptionPayment);
+        // mint cardid 0
+        uint256 tokenId = subscription.mint(msg.sender, 0, 1);
+        userCardId[msg.sender] = tokenId;
+        emit PayActiveSubscription(msg.sender, _activeSubscriptionPayment, tokenId);
     }
 
     /**
@@ -298,15 +328,19 @@ contract AISubscriptionMarket is Initializable, AccessControlUpgradeable, UUPSUp
      * @param amount New active subscription payment
      */
     function setActiveSubscriptionPayment(uint256 amount) public onlyRole(ADMIN_ROLE) {
+        require(amount <= _MAX_ACTIVE_SUBSCRIPTION_PAYMENT, "AM: invalid amount");
         activeSubscriptionPayment = amount;
+        emit SetActiveSubscriptionPayment(amount);
     }
 
     /**
-     * @dev Internal function to pay for active subscription
+     * @dev Sets the wallet address for receiving funds
+     * @param fundReceiver_ New fund receiver address
      */
-    function _payNativeToken(uint256 amount) internal {
-        (bool success, ) = msg.sender.call{value: amount}("");
-        require(success, "AM: transfer failed");
+    function setFundReceiver(address fundReceiver_) public onlyRole(DEFAULT_ADMIN_ROLE) {
+        require(fundReceiver_ != address(0), "AM: zero address");
+        _fundReceiver = fundReceiver_;
+        emit SetFundReceiver(fundReceiver_);
     }
 
     /**
@@ -315,18 +349,21 @@ contract AISubscriptionMarket is Initializable, AccessControlUpgradeable, UUPSUp
     function _activateSubscription(address user) internal {
         activeSubscription[user] = true;
     }
-
-    /**
-     * @dev Internal function to deactivate subscription
-     */
-    function _deactivateSubscription(address user) internal {
-        activeSubscription[user] = false;
-    }
     
     /**
      * @dev Withdraws Token from the contract to the wallet address
+     * @notice Can only withdraw after the refund window has been opened and closed
+     * @param token Address of token to withdraw (address(0) for native token)
+     * @param amount Amount to withdraw
      */
-    function withdrawToken(address token, uint256 amount, address to) public nonReentrant onlyRole(ADMIN_ROLE) {
+    function withdrawToken(address token, uint256 amount) public nonReentrant onlyRole(ADMIN_ROLE) {
+        require(_fundReceiver != address(0), "AM: fund receiver is not set");
+        uint256 _startTime = refundWindow.startTime;
+        uint256 _endTime = refundWindow.endTime;
+        require(_startTime > 0, "AM: refund window never set");
+        require(_endTime > 0 && block.timestamp > _endTime && _endTime > _startTime, "AM: refund window not closed");
+        address to = _fundReceiver;
+
         if (token == address(0)) {
             (bool success, ) = to.call{value: amount}("");
             require(success, "AM: transfer failed");
@@ -341,6 +378,7 @@ contract AISubscriptionMarket is Initializable, AccessControlUpgradeable, UUPSUp
      * @param receiver_ New receiver address
      */
     function setReceiver(address receiver_) public onlyRole(ADMIN_ROLE) {
+        require(receiver_ != address(0), "AM: zero address");
         receiver = receiver_;
         emit SetReceiver(receiver_);
     }
@@ -350,6 +388,7 @@ contract AISubscriptionMarket is Initializable, AccessControlUpgradeable, UUPSUp
      * @param subscriptionAddr_ New AISubscription contract address
      */
     function setSubscriptionService(address subscriptionAddr_) public onlyRole(ADMIN_ROLE) {
+        require(address(subscription) == address(0), "AM: already set");
         _setSubscriptionService(subscriptionAddr_);
     }
 
@@ -357,10 +396,10 @@ contract AISubscriptionMarket is Initializable, AccessControlUpgradeable, UUPSUp
      * @dev Transfers ownership of the contract to a new owner
      * @param newOwner New owner address
      */
-    function transferOwnership(address newOwner) public onlyRole(ADMIN_ROLE) {
+    function transferOwnership(address newOwner) public onlyRole(DEFAULT_ADMIN_ROLE) {
         require(newOwner != address(0), "AM: zero address");
-        _grantRole(ADMIN_ROLE, newOwner);
-        _revokeRole(ADMIN_ROLE, msg.sender);
+        _grantRole(DEFAULT_ADMIN_ROLE, newOwner);
+        _revokeRole(DEFAULT_ADMIN_ROLE, msg.sender);
     }
 
     /**
@@ -369,6 +408,7 @@ contract AISubscriptionMarket is Initializable, AccessControlUpgradeable, UUPSUp
      * @param isAuthorized Boolean indicating whether to authorize or revoke
      */
     function authorizeAdmin(address admin, bool isAuthorized) public onlyRole(DEFAULT_ADMIN_ROLE) {
+        require(admin != address(0), "AM: zero address");
         if (isAuthorized) {
             _grantRole(ADMIN_ROLE, admin);
         } else {
@@ -402,7 +442,7 @@ contract AISubscriptionMarket is Initializable, AccessControlUpgradeable, UUPSUp
      * @param tokenId_ Token ID to refund
      * @return refundAmount Amount refunded
      */
-    function refundSubscription(uint256 tokenId_) public nonReentrant returns (uint256) {
+    function refundSubscription(uint256 tokenId_) public nonReentrant whenNotPaused returns (uint256) {
         // Check eligibility and get refund amount
         (bool eligible, uint256 refundAmount, , string memory reason) = checkRefundEligibility(tokenId_, msg.sender);
         require(eligible, string(abi.encodePacked("AM: refund not eligible - ", reason)));
@@ -445,15 +485,14 @@ contract AISubscriptionMarket is Initializable, AccessControlUpgradeable, UUPSUp
         
         // Decrease rate for each day held
         if (holdingDays > 0) {
-            uint256 reduction = (holdingDays * refundPolicy.decreaseRate) / 100;
-            
-            if (reduction >= rate) {
+            uint256 precisionFactor = 1e18;
+            uint256 rateWithPrecision = rate * precisionFactor;
+            uint256 reduction = (holdingDays * refundPolicy.decreaseRate * precisionFactor) / 100;
+            if (reduction >= rateWithPrecision) {
                 return refundPolicy.minRefundRate;
             }
-            
-            rate = rate - reduction;
-            
-            // Ensure rate doesn't go below minimum
+            rateWithPrecision = rateWithPrecision - reduction;
+            rate = rateWithPrecision / precisionFactor;
             if (rate < refundPolicy.minRefundRate) {
                 rate = refundPolicy.minRefundRate;
             }
@@ -477,7 +516,7 @@ contract AISubscriptionMarket is Initializable, AccessControlUpgradeable, UUPSUp
         uint256 minRefundRate,
         uint256 cooldownPeriod
     ) public onlyRole(ADMIN_ROLE) {
-        require(baseRefundRate <= 100, "AM: invalid base refund rate");
+        require(baseRefundRate <= _MAX_REFUND_RATE, "AM: invalid base refund rate");
         require(minRefundRate <= baseRefundRate, "AM: min rate exceeds base rate");
         
         refundPolicy = RefundPolicy({
@@ -622,12 +661,18 @@ contract AISubscriptionMarket is Initializable, AccessControlUpgradeable, UUPSUp
      * @dev Sets the refund time window
      * @param startTime_ Start timestamp
      * @param endTime_ End timestamp
+     * @notice Once set, endTime can only be decreased, not increased
      */
     function setRefundWindow(
         uint256 startTime_,
         uint256 endTime_
     ) public onlyRole(ADMIN_ROLE) {
         require(startTime_ < endTime_ || (startTime_ == 0 && endTime_ == 0), "AM: invalid time window");
+        
+        // If refund window was already set, endTime can only be decreased
+        if (refundWindow.endTime > 0 && endTime_ > 0) {
+            require(endTime_ <= refundWindow.endTime, "AM: end time can only be decreased");
+        }
         
         refundWindow.startTime = startTime_;
         refundWindow.endTime = endTime_;
@@ -677,6 +722,21 @@ contract AISubscriptionMarket is Initializable, AccessControlUpgradeable, UUPSUp
         
         return (purchaseActive, purchaseTimeLeft, refundActive, refundTimeLeft);
     }
+
+    /**
+     * @dev Pauses all token operations
+     */
+    function pause() public onlyRole(ADMIN_ROLE) {
+        _pause();
+    }
+
+    /**
+     * @dev Unpauses all token operations
+     */
+    function unpause() public onlyRole(ADMIN_ROLE) {
+        _unpause();
+    }
+
 
     /**
      * @dev Function that should revert when `msg.sender` is not authorized to upgrade the contract. Called by
