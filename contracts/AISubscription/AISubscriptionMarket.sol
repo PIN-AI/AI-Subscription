@@ -243,7 +243,7 @@ contract AISubscriptionMarket is Initializable, AccessControlUpgradeable, UUPSUp
         require(hasRole(SIGNER_ROLE, (messageHash.toEthSignedMessageHash()).recover(signature_)), "AM: invalid signer");
 
         uint256 payAmount = getCardPrice(cardId_);
-        require(msg.value >= payAmount, "AM: insufficient ETH");
+        require(msg.value >= payAmount && payAmount > 0, "AM: insufficient ETH");
         
         // Mint the subscription to the buyer
         uint tokenId = subscription.mint(msg.sender, cardId_, 1);
@@ -305,7 +305,7 @@ contract AISubscriptionMarket is Initializable, AccessControlUpgradeable, UUPSUp
     /**
      * @dev Pay for active subscription
      */
-    function payActiveSubscription() public payable whenNotPaused {
+    function payActiveSubscription() public payable whenNotPaused withinPurchaseWindow {
         uint256 _activeSubscriptionPayment = activeSubscriptionPayment;
         require(subscription.balanceOf(msg.sender) == 0, "AM: already owned");
         require(!activeSubscription[msg.sender], "AM: already active subscription");
